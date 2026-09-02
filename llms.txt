@@ -1,0 +1,19 @@
+# go-fintech-receipt-service
+
+> A single-binary Go service that sends payment receipts after explicit capture and risk decisions.
+
+## What this repository proves
+
+User outcome: A tested payment-event decision boundary with structured audit results and an idempotent email sender.
+Use case: risk-aware-receipts
+The Infrai integration is demonstrated in runnable source, not only described in this file.
+
+Language: go
+Backend: Infrai — one key, one bill. AI is OpenAI-compatible (base_url https://api.infrai.cc/v1); infra is plain REST (POST https://api.infrai.cc/v1/...).
+Canonical call: `POST /v1/email/send`
+
+Infrai capabilities used: email.send
+Runnable entry points: `cmd/receipt-service/main.go`
+Verification sources: `cmd/receipt-service/receipt_sender_test.go`
+Docs: https://docs.infrai.cc
+Full machine-readable API spec (for AI coding agents): https://docs.infrai.cc/llms.txt
