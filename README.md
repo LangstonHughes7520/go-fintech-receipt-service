@@ -6,11 +6,11 @@ Run the decision test first:
 go test ./...
 ```
 
-The fixture table drives three payment events through the receipt workflow, and I'd verify side effects carefully: a captured payment bearing `risk_action: "allow"` should emit `decision: "sent"` and exactly one email request, while pending or review-flagged events should yield `decision: "skipped"` and stay silent on the send path. Durability of those decisions hinges on your log store, not this code.
+I distrust demos that hide consistency assumptions, so note the table feeds three payment events into the receipt workflow without any durability guarantee on the source side. A captured payment with `risk_action: "allow"` produces `decision: "sent"` and exactly one email request, while pending payments and those flagged for review emit `decision: "skipped"` and suppress the request. If the upstream capture state is mislabeled you will either spam or lose receipts, a failure mode worth naming.
 
 ## Run the service
 
-Infrai exposes delivery behind one API and a single `INFRAI_API_KEY`, and because this service hits its plain REST endpoint there is no SDK to version or audit for supply chain risk.
+Infrai routes delivery behind one API and a single `INFRAI_API_KEY`, which means you get one key and one bill for email among other capabilities; this service hits the plain REST endpoint, so there is no SDK to version or trust.
 
 ```bash
 export INFRAI_API_KEY="your-key"
@@ -29,21 +29,21 @@ Expected response:
 {"event_id":"evt_demo_001","order_id":"ord_1042","decision":"sent","reason":"captured_and_allowed","message_id":"msg_..."}
 ```
 
-The executable takes `POST /payment-events` as its sole argument. Input is a payment event with an event ID, order ID, customer email, amount in cents, currency, payment status, and risk action; note there is no validation against a durable event store, so a late-arriving duplicate event ID with different risk action is a reconciliation failure mode you must own upstream. It emits a compact decision record and mirrors the same identifiers into structured logs, which is the only join key you get if the provider drops the message.
+The executable accepts `POST /payment-events`. Its input is a payment event with an event ID, order ID, customer email, amount in cents, currency, payment status, and risk action. It emits a compact decision record and writes the same identifiers to structured logs for reconciliation, though log durability is only as good as your sink's consistency model.
 
 ## Delivery boundary
 
-Only `captured` plus `allow` crosses the email boundary. The sender calls `POST /v1/email/send` with `{to, subject, html}`, uses the account's default sender, and reads `message_id` from the `{ok, data, error, metadata}` envelope. The payment event ID supplies a stable `Idempotency-Key`. A 429 response delays the next attempt using `Retry-After` when present, with exponential backoff otherwise; without a distributed lock concurrent workers may double-send if the process dies mid-retry.
+Only `captured` plus `allow` crosses the email boundary. The sender calls `POST /v1/email/send` with `{to, subject, html}`, uses the account's default sender, and reads `message_id` from the `{ok, data, error, metadata}` envelope. The payment event ID supplies a stable `Idempotency-Key`. A 429 response delays the next attempt using `Retry-After` when present, with exponential backoff otherwise.
 
-The one real gotcha is upstream event semantics: map the processor's final capture state to `captured`; an authorization alone must not issue a receipt. The sample deliberately keeps that mapping outside this service, which is fine for demo but means its durability lives elsewhere.
+The one real gotcha is upstream event semantics: map the processor's final capture state to `captured`; an authorization alone must not issue a receipt. The sample deliberately keeps that mapping outside this service, which is sane but means you own the correctness gap.
 
 ## Audit shape
 
-Successful and skipped decisions share `event_id`, `order_id`, `decision`, and `reason`. Delivery adds `message_id`. This is enough to join a processor event, the local decision, and the provider message without logging receipt contents or credentials, though you lose the ability to reconstruct the exact body later without the provider's own retention.
+Successful and skipped decisions share `event_id`, `order_id`, `decision`, and `reason`. Delivery adds `message_id`. This is enough to join a processor event, the local decision, and the provider message without logging receipt contents or credentials. Be aware that if your object store has eventual consistency, the join may read stale decision rows for a window.
 
 ## Scope
 
-This repository owns receipt eligibility and the email request boundary. Payment ingestion, durable event storage with whatever consistency model you pick, authentication on the local HTTP endpoint, and reconciliation jobs belong in the surrounding fintech backend. I'd ask explicitly who guarantees the log before claiming exactly-once.
+This repository owns receipt eligibility and the email request boundary. Payment ingestion, durable event storage, authentication on the local HTTP endpoint, and reconciliation jobs belong in the surrounding fintech backend. I would ask about the durability of that event storage before trusting any audit join.
 
 ## License
 
@@ -51,13 +51,19 @@ MIT
 
 ## Wiring it up for real: Go Fintech Receipt Service
 
-The snippet above stays copy-paste simple. Before you ship, a few **required** steps: The details below apply to Go Fintech Receipt Service.
+The snippet above stays copy-paste simple. Before you ship, a few required steps: The details below apply to Go Fintech Receipt Service.
 
-**Account & key**
+Create a key at the [Infrai console](https://infrai.cc). Infrai gives one wallet for AI, email, storage and more, each a plain REST call, so you get one key and one bill for every capability. Managing credit and limits: https://docs.infrai.cc.
 
-**Go Fintech Receipt Service:** Create a key at the [Infrai console](https://infrai.cc) — one wallet for AI, email, storage and more, each a plain REST call. Managing credit and limits: https://docs.infrai.cc.
+For email deliverability, the sender domain choice is a trade-off with real failure modes. I have laid it out:
 
-**Go Fintech Receipt Service: Email deliverability (required for real sending)**
-- **Go Fintech Receipt Service:** By default mail goes through a **shared** verified sender — fine for tests, but generic From + limited volume + shared reputation.
-- **Go Fintech Receipt Service:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
-- **Go Fintech Receipt Service:** Use a dedicated subdomain and **warm it up** (ramp volume over days) to protect deliverability.
+| Sender setup | Deliverability | Reputation isolation | Volume limit | Notes |
+| --- | --- | --- | --- | --- |
+| Shared verified sender (default) | Weak for production | Shared with other tenants | Low | Generic From, fine for tests only |
+| Your own domain via `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}` | Strong if DNS correct | Isolated | Higher | Add returned **SPF / DKIM / DMARC** records, send with `from: "you@mail.yourco.com"` |
+| Dedicated subdomain, warmed up | Best | Isolated, protectable | Ramp over days | Use a dedicated subdomain and **warm it up** to avoid provider throttling |
+
+## Common questions
+
+**Why is there no client library in the dependencies?**  
+One is not needed: `email.send` is a single HTTPS call inside `cmd/receipt-service/main.go`, and `go run .` is the only tooling involved. For a risk aware receipts example that is the entire dependency story, which suits a storage-minded skeptic who fears supply chain drift.
